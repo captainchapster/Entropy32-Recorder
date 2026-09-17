@@ -1,5 +1,7 @@
 # Entropy32 Recorder
 
+![Assembled PCB](images/entropy32_recorder.png)
+
 Firmware, hardware, and tooling for Entropy32 — a Geiger-counter-based
 hardware random number generator built around an ATmega328P (Arduino Nano
 form factor).
