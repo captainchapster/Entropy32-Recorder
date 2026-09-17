@@ -1,12 +1,10 @@
-// Entropy32 — D2 raw edge capture (pilot sketch)
+// Entropy32 Recorder — D2 raw edge capture
 //
-// Temporarily replaces normal Entropy32 firmware. Does NOT run the
-// 200us filter, interval pairing, or SHA-256 conditioning — it only
-// timestamps every rising edge on D2 (post-LM393) and streams it out
-// over serial as CSV. Reflash your normal firmware when done.
-//
-// Board: same ATmega328P, same D2 pull-down/comparator wiring as
-// production Entropy32. Just different code.
+// Firmware for the standalone Entropy32 Recorder board (a separate board
+// from Entropy32 / Entropy32 Plus). Does NOT run any filter, interval
+// pairing, or SHA-256 conditioning — it only timestamps every rising edge
+// on D2 (post-LM393) and streams it out over serial as CSV, for later
+// statistical testing (e.g. NIST STS) of the raw entropy source.
 
 #define D2_PIN 2
 #define RING_SIZE 256   // must be a power of 2

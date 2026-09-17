@@ -2,25 +2,31 @@
 
 ![Assembled PCB](images/entropy32_recorder.png)
 
-Firmware, hardware, and tooling for Entropy32 — a Geiger-counter-based
-hardware random number generator built around an ATmega328P (Arduino Nano
-form factor).
+Firmware, hardware, and tooling for the Entropy32 Recorder — a standalone
+Geiger-counter-based board, built around an ATmega328P (Arduino Nano form
+factor), for recording raw entropy source data.
+
+This is a **separate board from Entropy32 / Entropy32 Plus**, not a mode or
+alternate firmware of it. It does not generate seeds or any conditioned
+output. Its only job is to capture raw, unconditioned edge timing data from
+the entropy source (Geiger tube + LM393 comparator) so it can be run through
+statistical test suites (e.g. NIST STS) to validate the quality of the
+entropy source itself, before that source is trusted for use in Entropy32
+Plus's seed generation.
 
 ## Repository layout
 
-- **`entropy32_recorder.ino`** — pilot sketch that temporarily replaces the
-  normal Entropy32 firmware. It timestamps every rising edge on D2
-  (post-LM393 comparator output) and streams `edge_index,timestamp_us` CSV
-  rows over serial. It intentionally skips the production firmware's
-  200us filter, interval pairing, and SHA-256 conditioning — it's for
-  capturing raw edge timing data only. Reflash the normal firmware when
-  done.
+- **`entropy32_recorder.ino`** — the recorder's firmware. It timestamps
+  every rising edge on D2 (post-LM393 comparator output) and streams
+  `edge_index,timestamp_us` CSV rows over serial. It does no filtering,
+  interval pairing, or SHA-256 conditioning by design — it's for capturing
+  raw edge timing data only, unmodified, for statistical testing.
 - **`tools/capture_serial_to_csv.py`** — reads the serial stream produced by
   the sketch above and writes it to a CSV file matching the evidence
   protocol's `raw/raw_edges.csv` shape (`edge_index`, `raw_timer_ticks`,
   `monotonic_timestamp_us`). Requires `pyserial`.
 - **`KiCad/`** — PCB design (schematic, layout, 3D models, and
-  fabrication/production outputs for the Entropy32 board).
+  fabrication/production outputs for the Entropy32 Recorder board).
 
 ## Hardware
 

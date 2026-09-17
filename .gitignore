@@ -78,8 +78,8 @@ gerbers/
 _autosave-*
 *.lck
 
-# But allow this specific zip file
-!geiger_entropy.zip
+# Except this specific file
+!entropy32_recorder.zip
 
 # Manual additions
 __pycache__

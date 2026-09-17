@@ -2,9 +2,10 @@
 """
 capture_serial_to_csv.py
 
-Reads the D2 edge stream from d2_edge_capture.ino and writes it to a
-CSV file shaped like the evidence protocol's raw/raw_edges.csv
-(edge_index, raw_timer_ticks, monotonic_timestamp_us).
+Reads the D2 edge stream from the Entropy32 Recorder board (running
+entropy32_recorder.ino) and writes it to a CSV file shaped like the
+evidence protocol's raw/raw_edges.csv (edge_index, raw_timer_ticks,
+monotonic_timestamp_us).
 
 For this pilot, raw_timer_ticks and monotonic_timestamp_us are the
 same value (the board's micros() reading) — no timer-wrap extension
