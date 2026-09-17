@@ -1,0 +1,9 @@
+﻿Designator,Footprint,Quantity,Value,LCSC Part #
+A1,Arduino_Nano,1,Arduino_Nano_v2.x,
+C1,C_Disc_D5.0mm_W2.5mm_P5.00mm,1,100nF,
+C2,C_Disc_D5.0mm_W2.5mm_P5.00mm,1,100pF,
+J1,Jack_3.5mm_PJ320E_Horizontal,1,AudioJack2,
+"R1, R4",R_Axial_DIN0207_L6.3mm_D2.5mm_P7.62mm_Horizontal,2,10k,
+"R2, R5",R_Axial_DIN0207_L6.3mm_D2.5mm_P7.62mm_Horizontal,2,1k,
+R3,R_Axial_DIN0207_L6.3mm_D2.5mm_P7.62mm_Horizontal,1,100k,
+U1,DIP-8_W7.62mm,1,LM393,
