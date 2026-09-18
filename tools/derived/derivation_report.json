@@ -1,0 +1,16 @@
+{
+  "min_interval_us": 200,
+  "pairing": "NON_OVERLAPPING",
+  "tie_rule": "DISCARD_PAIR",
+  "bit_rule": "SECOND_LONGER=1;SECOND_SHORTER=0",
+  "raw_edges": 10000,
+  "unfiltered_intervals": 9999,
+  "short_interval_rejections": 0,
+  "accepted_intervals": 9999,
+  "complete_pairs": 4999,
+  "ties": 0,
+  "comparison_zeroes": 2472,
+  "comparison_ones": 2527,
+  "comparison_bits": 4999,
+  "dangling_unpaired_intervals": 1
+}
