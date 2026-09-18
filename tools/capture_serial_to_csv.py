@@ -13,10 +13,25 @@ is that value unwrapped into an ever-increasing 64-bit microsecond
 count, reconstructed here by accumulating (raw[i] - raw[i-1]) mod 2**32
 between consecutive edges. This is only valid as long as consecutive
 edges are less than one full wrap period (~71.58 min) apart; a bigger
-gap (e.g. the capture was paused, or the source is extremely sparse)
-would be indistinguishable from a single wrap and silently understate
-elapsed time, so such gaps are flagged to stderr rather than fixed up
-silently.
+gap (e.g. the source is extremely sparse) would be indistinguishable
+from a single wrap and silently understate elapsed time, so such gaps
+are flagged to stderr rather than fixed up silently.
+
+This script intentionally refuses to run at all if --out already has
+data — one capture is one continuous, uninterrupted run from edge 0, per
+the evidence protocol; there is no --resume. If the capture stops for
+any reason, start a fresh run under a new --out filename.
+
+Drop detection: the board tags every edge it sends with its own
+sequential index (in addition to the timestamp). This script checks that
+index against how many edges it has received so far; any mismatch means
+a serial line was dropped, duplicated, or reordered in transit, and any
+line that fails to parse at all means a line was garbled — either way,
+per the evidence protocol's dropped-event criterion, that immediately
+invalidates the capture. There is no soft "skip a few bad lines and
+carry on": the run aborts on the first such event, because a garbled or
+missing line is indistinguishable from a genuinely lost edge, and this
+protocol does not interpolate.
 
 Requires: pip install pyserial
 
@@ -27,15 +42,33 @@ Usage:
 import argparse
 import csv
 import math
+import os
 import sys
+from datetime import datetime, timedelta
 
 import serial
 
-WRAP_PERIOD_US = 1 << 32
-# Gaps within this margin of a full wrap period are ambiguous (could be a
-# single wrap, or the wrap plus a fast-forward past a second one) and get
-# flagged rather than trusted silently.
-WRAP_WARN_MARGIN_US = 5 * 60 * 1_000_000  # 5 minutes
+from edge_timing import WRAP_WARN_MARGIN_US, wrap_delta, near_wrap
+
+
+def format_duration(seconds):
+    """Compact human-readable duration, e.g. '3h 22m' or '6w 2d' — scales
+    from seconds up to weeks since a full campaign can run ~6 weeks."""
+    seconds = int(round(seconds))
+    if seconds < 60:
+        return f"{seconds}s"
+    minutes, seconds = divmod(seconds, 60)
+    if minutes < 60:
+        return f"{minutes}m {seconds}s"
+    hours, minutes = divmod(minutes, 60)
+    if hours < 24:
+        return f"{hours}h {minutes}m"
+    days, hours = divmod(hours, 24)
+    if days < 7:
+        return f"{days}d {hours}h"
+    weeks, days = divmod(days, 7)
+    return f"{weeks}w {days}d"
+
 
 # Once we've heard from the board at least once, a read timeout just means
 # the source hasn't fired yet (event rates are naturally variable) — not a
@@ -77,81 +110,164 @@ def main():
                     help="stop after this many edges (~2000 is ~1hr at 20 CPM)")
     p.add_argument("--stats-every", type=int, default=100,
                     help="print a CPM/Poisson status line every N edges (0 to disable)")
+    p.add_argument("--flush-every", type=int, default=1,
+                    help="fsync to disk every N edges (default: every edge — "
+                         "at this event source's rate that's essentially "
+                         "free, and each edge is an irreplaceable physical "
+                         "event; raise this only for a much faster source). "
+                         "A final fsync always happens on Ctrl+C, a crash "
+                         "Python can still catch, or normal completion — "
+                         "not on power loss, which no software can protect "
+                         "against.")
+    p.add_argument("-y", "--yes", action="store_true",
+                    help="if --out already exists, overwrite and start a "
+                         "fresh capture without asking for confirmation")
     args = p.parse_args()
+    if args.flush_every < 1:
+        p.error("--flush-every must be >= 1")
+
+    if os.path.exists(args.out):
+        if args.yes:
+            print(f"{args.out} already exists — overwriting (--yes given).")
+        else:
+            print(f"{args.out} already exists. One capture is one "
+                  "continuous, uninterrupted run from edge 0, so continuing "
+                  "it isn't an option — but it can be overwritten and "
+                  "restarted from edge 0 here.")
+            try:
+                reply = input(f"Overwrite {args.out} and start a new "
+                               "capture? [y/N]: ").strip().lower()
+            except EOFError:
+                reply = ""
+            if reply not in ("y", "yes"):
+                print("Not overwriting. Choose a different --out, delete "
+                      "the file yourself, or pass --yes to skip this "
+                      "prompt.", file=sys.stderr)
+                sys.exit(1)
 
     print(f"Listening for device on {args.port}...")
     ser = serial.Serial(args.port, args.baud, timeout=10)
     n = 0
-    skipped_lines = 0
     prev_raw = None
     monotonic = 0
     monotonic_start = None
     diffs_us = []
     connected = False
     consecutive_timeouts = 0
+    interrupted = False
+    since_flush = 0
     with open(args.out, "w", newline="") as f:
         writer = csv.writer(f)
         writer.writerow(["edge_index", "raw_timer_ticks", "monotonic_timestamp_us"])
-        while n < args.count:
-            raw = ser.readline()
-            if not raw:
-                consecutive_timeouts += 1
+        try:
+            while n < args.count:
+                raw = ser.readline()
+                if not raw:
+                    consecutive_timeouts += 1
+                    if not connected:
+                        print("No data for 10s — check wiring/port.", file=sys.stderr)
+                    elif consecutive_timeouts % IDLE_HEARTBEAT_TIMEOUTS == 0:
+                        idle_s = consecutive_timeouts * 10
+                        print(f"Still connected, no edge for {idle_s}s — "
+                              "normal for a quiet source, not a problem by itself.",
+                              file=sys.stderr)
+                    continue
                 if not connected:
-                    print("No data for 10s — check wiring/port.", file=sys.stderr)
-                elif consecutive_timeouts % IDLE_HEARTBEAT_TIMEOUTS == 0:
-                    idle_s = consecutive_timeouts * 10
-                    print(f"Still connected, no edge for {idle_s}s — "
-                          "normal for a quiet source, not a problem by itself.",
-                          file=sys.stderr)
-                continue
-            if not connected:
-                print("Device acknowledged.")
-            connected = True
-            consecutive_timeouts = 0
-            line = raw.decode(errors="replace").strip()
-            if not line or line == "edge_index,timestamp_us":
-                continue
-            if line == "OVERRUN_DETECTED":
-                print("!! Board reported a dropped edge — this capture is "
-                      "INVALID per the evidence protocol. Restart.",
+                    print("Device acknowledged.")
+                connected = True
+                consecutive_timeouts = 0
+                line = raw.decode(errors="replace").strip()
+                if not line or line == "edge_index,timestamp_us":
+                    continue
+                if line == "OVERRUN_DETECTED":
+                    print("!! Board reported a dropped edge — this capture is "
+                          "INVALID per the evidence protocol. Restart with a "
+                          f"fresh --out; the {n} edge(s) already written to "
+                          f"{args.out} cannot be used.", file=sys.stderr)
+                    sys.exit(1)
+                try:
+                    idx_str, ts_str = line.split(",")
+                    idx = int(idx_str)
+                    ts = int(ts_str)
+                except ValueError:
+                    print(f"!! Unparseable serial line: {line!r} — a garbled "
+                          "line can't be distinguished from a dropped or "
+                          "corrupted edge, so this capture is INVALID per "
+                          f"the evidence protocol. Restart with a fresh "
+                          f"--out; the {n} edge(s) already written to "
+                          f"{args.out} cannot be used.", file=sys.stderr)
+                    sys.exit(1)
+
+                if idx != n:
+                    print(f"!! Device reported edge_index {idx} but {n} "
+                          "edge(s) have been received so far — a serial "
+                          "line was dropped, duplicated, or reordered in "
+                          "transit. This capture is INVALID per the "
+                          f"evidence protocol. Restart with a fresh --out; "
+                          f"the {n} edge(s) already written to {args.out} "
+                          "cannot be used.", file=sys.stderr)
+                    sys.exit(1)
+
+                if prev_raw is None:
+                    monotonic = 0
+                    monotonic_start = monotonic
+                else:
+                    delta = wrap_delta(ts, prev_raw)
+                    if near_wrap(delta):
+                        print(f"!! Gap before edge {n} is within {WRAP_WARN_MARGIN_US // 1_000_000}s "
+                              "of a full timer-wrap period — the reconstructed "
+                              "monotonic_timestamp_us for this edge may be wrong "
+                              "(possible missed multi-wrap gap). Inspect this run "
+                              "before trusting it.", file=sys.stderr)
+                    monotonic += delta
+                    diffs_us.append(delta)
+                prev_raw = ts
+
+                writer.writerow([n, ts, monotonic])
+                f.flush()
+                since_flush += 1
+                synced = since_flush >= args.flush_every
+                if synced:
+                    os.fsync(f.fileno())
+                    since_flush = 0
+                n += 1
+                flush_note = " [synced to disk]" if synced else ""
+                print(f"  edge {n - 1} captured ({n}/{args.count}, "
+                      f"{100.0 * n / args.count:.1f}%){flush_note}")
+                if args.stats_every and n % args.stats_every == 0:
+                    elapsed_us = monotonic - monotonic_start
+                    cpm = 60e6 * len(diffs_us) / elapsed_us if elapsed_us > 0 else float("nan")
+                    verdict = poisson_status(diffs_us) if len(diffs_us) >= 10 else "n/a (too few samples yet)"
+                    remaining = args.count - n
+                    if remaining <= 0:
+                        eta_str = "done"
+                    elif cpm and cpm > 0 and not math.isnan(cpm):
+                        eta_seconds = remaining / cpm * 60
+                        finish_time = datetime.now() + timedelta(seconds=eta_seconds)
+                        eta_str = (f"{format_duration(eta_seconds)} remaining, "
+                                   f"ETA {finish_time.strftime('%Y-%m-%d %H:%M')}")
+                    else:
+                        eta_str = "ETA: calculating (not enough data yet)"
+                    pct = 100.0 * n / args.count
+                    print(f"== {n}/{args.count} edges ({pct:.1f}%) — "
+                          f"~{cpm:.2f} CPM, poisson check: {verdict}, {eta_str}")
+        except KeyboardInterrupt:
+            interrupted = True
+        finally:
+            if since_flush:
+                f.flush()
+                os.fsync(f.fileno())
+                print(f"Flushed {since_flush} pending edge(s) to disk before exit.",
                       file=sys.stderr)
-                sys.exit(1)
-            try:
-                idx_str, ts_str = line.split(",")
-                ts = int(ts_str)
-            except ValueError:
-                skipped_lines += 1
-                continue  # ignore garbage/partial line
 
-            if prev_raw is None:
-                monotonic = ts
-                monotonic_start = ts
-            else:
-                delta = (ts - prev_raw) % WRAP_PERIOD_US
-                if delta > WRAP_PERIOD_US - WRAP_WARN_MARGIN_US:
-                    print(f"!! Gap before edge {n} is within {WRAP_WARN_MARGIN_US // 1_000_000}s "
-                          "of a full timer-wrap period — the reconstructed "
-                          "monotonic_timestamp_us for this edge may be wrong "
-                          "(possible missed multi-wrap gap). Inspect this run "
-                          "before trusting it.", file=sys.stderr)
-                monotonic += delta
-                diffs_us.append(delta)
-            prev_raw = ts
-
-            writer.writerow([n, ts, monotonic])
-            n += 1
-            if args.stats_every and n % args.stats_every == 0:
-                elapsed_us = monotonic - monotonic_start
-                cpm = 60e6 * len(diffs_us) / elapsed_us if elapsed_us > 0 else float("nan")
-                verdict = poisson_status(diffs_us) if len(diffs_us) >= 10 else "n/a (too few samples yet)"
-                print(f"{n}/{args.count} edges captured — "
-                      f"~{cpm:.2f} CPM, poisson check: {verdict}")
-
-    print(f"Done. {n} edges written to {args.out}")
-    if skipped_lines:
-        print(f"Note: {skipped_lines} malformed/partial serial line(s) were "
-              "skipped during this capture — check the link if this number "
-              "is large.", file=sys.stderr)
+    if interrupted:
+        print(f"\nInterrupted by user after {n} edge(s) — all of it is "
+              f"safely on disk, but per the evidence protocol this capture "
+              "is not valid evidence (not a complete, uninterrupted run). "
+              "Start a fresh run under a new --out to try again.",
+              file=sys.stderr)
+    else:
+        print(f"Done. {n} edges written to {args.out}")
 
 
 if __name__ == "__main__":
