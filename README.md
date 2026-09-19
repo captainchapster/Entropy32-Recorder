@@ -40,8 +40,12 @@ Plus's seed generation.
   capture is one continuous, uninterrupted run from edge 0 — per the
   evidence protocol, there is no resume; the tool refuses to run at all
   if `--out` already has data, and an interrupted capture must be
-  restarted under a new `--out` rather than continued. Requires
-  `pyserial`.
+  restarted under a new `--out` rather than continued. On a fully
+  complete run, also writes a `capture_status.json` sibling (e.g.
+  `raw_edges.status.json`) recording edge count, start/end UTC
+  timestamps, and the zero overrun/drop counts implied by reaching that
+  point at all — this feeds `tools/package_evidence.py` and the
+  protocol's `capture_status.json` (§4). Requires `pyserial`.
 - **`tools/edge_timing.py`** — the timer-wrap-unwrapping math used by the
   capture tool, in its own module mainly so it can be tested in isolation.
 - **`tools/check_edges.py`** — pre-flight sanity check for a captured CSV:
@@ -57,10 +61,22 @@ Plus's seed generation.
   producing the protocol's `derived/` package — `all_intervals_us.csv`,
   `firmware_accepted_intervals_us.csv`, `comparison_bits.bin`,
   `derivation_report.json`.
-  `python tools/derive_evidence.py raw_edges.csv --out-dir derived/`.
+  `python tools/derive_evidence.py raw_edges.csv --out-dir derived/ --source-dir ../entropy32_plus`.
   `comparison_bits.bin` is ready for `ea_non_iid -i -v comparison_bits.bin 1`
   (bits_per_symbol=1, per the protocol's §8 — not a byte-per-symbol
-  truncation).
+  truncation). `--source-dir` (optional but recommended) points at a local
+  checkout of the firmware these constants are claimed to match, and
+  auto-fills `derivation_report.json`'s `source_repo`/`source_commit`/
+  `entropy32_firmware_blob_sha` from its git metadata and `.ino` hash —
+  left `"unknown"` rather than guessed if omitted.
+- **`tools/package_evidence.py`** — assembles the protocol's immutable
+  evidence directory (§4) from a capture, a `derive_evidence.py` run, and
+  a separately-run `ea_non_iid` pass: copies `raw/` and `derived/` in,
+  records the exact NIST command/toolchain/exit status under `nist/`,
+  writes `capture_status.json` and a `manifest.json` (fields it can't
+  know — hardware, physical source, environment — are left `null` and
+  listed on stdout for manual completion), and computes a `SHA256SUMS`
+  covering every file in the package.
 - **`KiCad/`** — PCB design (schematic, layout, 3D models, and
   fabrication/production outputs for the Entropy32 Recorder board).
 
@@ -95,13 +111,26 @@ files under `KiCad/production/`.
 5. Reconstruct Entropy32's actual bit stream:
 
    ```
-   python tools/derive_evidence.py raw_edges.csv --out-dir derived/
+   python tools/derive_evidence.py raw_edges.csv --out-dir derived/ --source-dir ../entropy32_plus
    ea_non_iid -i -v derived/comparison_bits.bin 1
    ```
 
-   See `entropy32_evidence_protocol.md` for the full evidence
-   package structure (manifest, hashes, restart testing) beyond this
-   derivation step.
+   Save `ea_non_iid`'s stdout/stderr and note its exit status — the
+   next step needs them.
+6. Assemble the immutable evidence package:
+
+   ```
+   python tools/package_evidence.py \
+     --raw raw_edges.csv --derived-dir derived/ --capture-id <your-id> \
+     --nist-command "./ea_non_iid -i -v comparison_bits.bin 1" \
+     --nist-stdout nist_stdout.txt --nist-stderr nist_stderr.txt \
+     --nist-exit-status 0
+   ```
+
+   Fill in whichever `manifest.json` fields it lists as left `null`
+   (hardware revision, physical source, environment) by hand — see
+   `entropy32_evidence_protocol.md` for what the full package and
+   restart testing require beyond this.
 
 ## Known limitations / best practices for a full campaign
 

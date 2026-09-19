@@ -1,4 +1,7 @@
 {
+  "source_repo": "https://github.com/captainchapster/Entropy32-Plus.git",
+  "source_commit": "311c859842a657c483ea931249c20a7ea0fd5d45",
+  "entropy32_firmware_blob_sha": "4bcb66301f2b913a2d938b5e91b6ad6f61d0d7e970df5adb391207670cd7ed23",
   "min_interval_us": 200,
   "pairing": "NON_OVERLAPPING",
   "tie_rule": "DISCARD_PAIR",

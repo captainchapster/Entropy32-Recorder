@@ -23,7 +23,11 @@ protocol's `derived/` package:
       discarded (no bit emitted).
 
   derivation_report.json
-      the reconciling counts for all of the above.
+      the reconciling counts for all of the above, plus source_repo/
+      source_commit/entropy32_firmware_blob_sha identifying the firmware
+      checkout these filter/pairing/bit-rule constants are claimed to
+      match (pass --source-dir, or leave unpinned as "unknown" rather
+      than guessed — see Section 10).
 
 comparison_bits.bin is meant for the protocol's pinned NIST toolchain
 (SP800-90B_EntropyAssessment v1.1.8):
@@ -40,8 +44,11 @@ Usage:
 """
 import argparse
 import csv
+import glob
+import hashlib
 import json
 import os
+import subprocess
 import sys
 
 MIN_INTERVAL_US = 200
@@ -50,6 +57,42 @@ MIN_INTERVAL_US = 200
 def edge_times(path):
     with open(path, newline="") as f:
         return [int(row["monotonic_timestamp_us"]) for row in csv.DictReader(f)]
+
+
+def git_output(args, cwd):
+    try:
+        return subprocess.run(["git"] + args, cwd=cwd, capture_output=True,
+                               text=True, check=True).stdout.strip()
+    except (OSError, subprocess.CalledProcessError):
+        return None
+
+
+def sha256_file(path):
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def detect_provenance(source_dir, source_repo, source_commit, firmware_blob_sha):
+    """Fill in whichever of source_repo/source_commit/firmware_blob_sha
+    weren't given explicitly, from a local checkout at --source-dir (the
+    firmware repo this evidence run's 200us-filter/pairing/bit-rule
+    constants are claimed to match). Anything that can't be determined
+    stays "unknown" rather than guessed, per the evidence protocol
+    (Section 10)."""
+    if source_dir:
+        if source_commit is None:
+            source_commit = git_output(["rev-parse", "HEAD"], source_dir) or "unknown"
+        if source_repo is None:
+            source_repo = git_output(["remote", "get-url", "origin"], source_dir) or "unknown"
+        if firmware_blob_sha is None:
+            inos = glob.glob(os.path.join(source_dir, "*.ino"))
+            if len(inos) == 1:
+                firmware_blob_sha = sha256_file(inos[0])
+    return (source_repo or "unknown", source_commit or "unknown",
+            firmware_blob_sha or "unknown")
 
 
 def derive(times):
@@ -106,9 +149,22 @@ def main():
     p.add_argument("csv_path", help="raw_edges.csv from capture_serial_to_csv.py")
     p.add_argument("--out-dir", default="derived",
                     help="directory for the derived/ package (default: ./derived)")
+    p.add_argument("--source-dir",
+                    help="path to a local checkout of the firmware this run's "
+                         "200us-filter/pairing/bit-rule constants are claimed "
+                         "to match (e.g. entropy32_plus/) — used to auto-fill "
+                         "--source-repo/--source-commit/--firmware-blob-sha "
+                         "from git and the checked-out .ino, for anything not "
+                         "given explicitly")
+    p.add_argument("--source-repo", help="overrides auto-detection from --source-dir")
+    p.add_argument("--source-commit", help="overrides auto-detection from --source-dir")
+    p.add_argument("--firmware-blob-sha", help="overrides auto-detection from --source-dir")
     args = p.parse_args()
 
     os.makedirs(args.out_dir, exist_ok=True)
+
+    source_repo, source_commit, firmware_blob_sha = detect_provenance(
+        args.source_dir, args.source_repo, args.source_commit, args.firmware_blob_sha)
 
     times = edge_times(args.csv_path)
     all_intervals, accepted_intervals, comparison_bits, counts = derive(times)
@@ -133,6 +189,9 @@ def main():
         f.write(bytes(comparison_bits))
 
     report = {
+        "source_repo": source_repo,
+        "source_commit": source_commit,
+        "entropy32_firmware_blob_sha": firmware_blob_sha,
         "min_interval_us": MIN_INTERVAL_US,
         "pairing": "NON_OVERLAPPING",
         "tie_rule": "DISCARD_PAIR",
@@ -169,6 +228,14 @@ def main():
         print(f"\nNote: {report['comparison_bits']} comparison bits is "
               "below the protocol's 1,000,000-sample stop gate "
               "(Section 3) — keep capturing.", file=sys.stderr)
+
+    if "unknown" in (source_repo, source_commit, firmware_blob_sha):
+        print("\nNote: source_repo/source_commit/entropy32_firmware_blob_sha "
+              "is \"unknown\" in this report — pass --source-dir (or the "
+              "individual --source-* flags) pointing at the firmware "
+              "checkout these 200us-filter/pairing/bit-rule constants are "
+              "claimed to match, so the report is self-verifying instead of "
+              "resting on an unpinned claim.", file=sys.stderr)
 
 
 if __name__ == "__main__":

@@ -22,6 +22,13 @@ data — one capture is one continuous, uninterrupted run from edge 0, per
 the evidence protocol; there is no --resume. If the capture stops for
 any reason, start a fresh run under a new --out filename.
 
+On a fully complete run only (never on an interrupted or invalidated
+one — see Drop detection below), a capture_status.json sibling is
+written next to --out (e.g. raw_edges.csv -> raw_edges.status.json),
+recording raw_edge_count, capture_start_utc/capture_end_utc, and the
+zero overrun/drop counts implied by reaching that point at all. This is
+the source for the evidence protocol's capture_status.json (Section 4).
+
 Drop detection: the board tags every edge it sends with its own
 sequential index (in addition to the timestamp). This script checks that
 index against how many edges it has received so far; any mismatch means
@@ -41,10 +48,11 @@ Usage:
 """
 import argparse
 import csv
+import json
 import math
 import os
 import sys
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 import serial
 
@@ -80,6 +88,14 @@ IDLE_HEARTBEAT_TIMEOUTS = 60
 # bounce/chatter shows up as an excess of very short inter-arrival times, and
 # checking only the low end keeps the periodic status line to one line.
 POISSON_CHECK_THRESHOLDS_MS = (1, 5, 10)
+
+
+def status_path(out_path):
+    """capture_status.json sits next to --out, named from it — e.g.
+    raw_edges.csv -> raw_edges.status.json — so a package-assembly step
+    can find and rename it into the protocol's capture_status.json."""
+    root, _ext = os.path.splitext(out_path)
+    return root + ".status.json"
 
 
 def poisson_status(diffs_us):
@@ -156,6 +172,8 @@ def main():
     consecutive_timeouts = 0
     interrupted = False
     since_flush = 0
+    capture_start_utc = None
+    capture_end_utc = None
     with open(args.out, "w", newline="") as f:
         writer = csv.writer(f)
         writer.writerow(["edge_index", "raw_timer_ticks", "monotonic_timestamp_us"])
@@ -211,6 +229,7 @@ def main():
                 if prev_raw is None:
                     monotonic = 0
                     monotonic_start = monotonic
+                    capture_start_utc = datetime.now(timezone.utc)
                 else:
                     delta = wrap_delta(ts, prev_raw)
                     if near_wrap(delta):
@@ -222,6 +241,7 @@ def main():
                     monotonic += delta
                     diffs_us.append(delta)
                 prev_raw = ts
+                capture_end_utc = datetime.now(timezone.utc)
 
                 writer.writerow([n, ts, monotonic])
                 f.flush()
@@ -268,6 +288,27 @@ def main():
               file=sys.stderr)
     else:
         print(f"Done. {n} edges written to {args.out}")
+        status = {
+            "raw_edge_count": n,
+            "capture_start_utc": capture_start_utc.isoformat() if capture_start_utc else None,
+            "capture_end_utc": capture_end_utc.isoformat() if capture_end_utc else None,
+            "port": args.port,
+            "baud": args.baud,
+            # Always 0 here by construction, not by counting: the board's
+            # OVERRUN_DETECTED, an unparseable line, and an edge_index gap
+            # all sys.exit(1) immediately above rather than incrementing a
+            # counter and continuing, so any run that reaches this point had
+            # zero of each - see the module docstring on why this protocol
+            # doesn't soft-skip bad events.
+            "buffer_overrun_count": 0,
+            "transport_drop_count": 0,
+            "capture_status": "COMPLETE",
+        }
+        sp = status_path(args.out)
+        with open(sp, "w") as sf:
+            json.dump(status, sf, indent=2)
+            sf.write("\n")
+        print(f"Wrote {sp}")
 
 
 if __name__ == "__main__":
