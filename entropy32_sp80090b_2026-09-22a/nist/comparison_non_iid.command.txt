@@ -1,0 +1,1 @@
+./ea_non_iid -i -v /mnt/d/Programming/entropy32_recorder/tools/derived/comparison_bits.bin 1

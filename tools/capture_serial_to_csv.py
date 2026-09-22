@@ -15,7 +15,12 @@ between consecutive edges. This is only valid as long as consecutive
 edges are less than one full wrap period (~71.58 min) apart; a bigger
 gap (e.g. the source is extremely sparse) would be indistinguishable
 from a single wrap and silently understate elapsed time, so such gaps
-are flagged to stderr rather than fixed up silently.
+are flagged rather than fixed up silently.
+
+Every row is fsync'd to disk as soon as it's written — at this event
+source's rate that's essentially free, and each edge is an
+irreplaceable physical event, so there's nothing to configure and
+nothing to report: a row on screen is already durable.
 
 This script intentionally refuses to run at all if --out already has
 data — one capture is one continuous, uninterrupted run from edge 0, per
@@ -86,7 +91,7 @@ IDLE_HEARTBEAT_TIMEOUTS = 60
 
 # Thresholds (ms) used for the live Poisson-consistency check. Kept small —
 # bounce/chatter shows up as an excess of very short inter-arrival times, and
-# checking only the low end keeps the periodic status line to one line.
+# checking only the low end keeps the live status line to one line.
 POISSON_CHECK_THRESHOLDS_MS = (1, 5, 10)
 
 
@@ -98,22 +103,24 @@ def status_path(out_path):
     return root + ".status.json"
 
 
-def poisson_status(diffs_us):
+def poisson_status(mean_us, diff_count, bounce_counts):
     """One-line verdict on whether short inter-arrival times (< 10ms) are
-    consistent with a Poisson process, or flag likely comparator bounce."""
-    mean = sum(diffs_us) / len(diffs_us)
-    if mean <= 0:
+    consistent with a Poisson process, or flag likely comparator bounce.
+
+    Takes running totals rather than the raw inter-arrival list so this
+    can be called every edge (real captures run to >=1,000,000 edges,
+    per the evidence protocol's SP 800-90B sample requirement) without
+    rescanning history each time — see bounce_counts in main()."""
+    if diff_count < 10:
+        return "n/a (too few samples yet)"
+    if mean_us <= 0:
         return "n/a"
-    bounce = False
     for t_ms in POISSON_CHECK_THRESHOLDS_MS:
         t_us = t_ms * 1000
-        n_obs = sum(1 for d in diffs_us if d < t_us)
-        n_exp = (1 - math.exp(-t_us / mean)) * len(diffs_us)
+        n_obs = bounce_counts[t_ms]
+        n_exp = (1 - math.exp(-t_us / mean_us)) * diff_count
         if n_exp >= 3 and n_obs / n_exp > 2.0:
-            bounce = True
-            break
-    if bounce:
-        return "WARNING: excess short (<10ms) intervals — check comparator bounce"
+            return "WARNING: excess short (<10ms) intervals — check comparator bounce"
     return "ok"
 
 
@@ -125,53 +132,127 @@ def main():
     p.add_argument("--count", type=int, default=2000,
                     help="stop after this many edges (~2000 is ~1hr at 20 CPM)")
     p.add_argument("--stats-every", type=int, default=100,
-                    help="print a CPM/Poisson status line every N edges (0 to disable)")
-    p.add_argument("--flush-every", type=int, default=1,
-                    help="fsync to disk every N edges (default: every edge — "
-                         "at this event source's rate that's essentially "
-                         "free, and each edge is an irreplaceable physical "
-                         "event; raise this only for a much faster source). "
-                         "A final fsync always happens on Ctrl+C, a crash "
-                         "Python can still catch, or normal completion — "
-                         "not on power loss, which no software can protect "
-                         "against.")
+                    help="recompute CPM/Poisson/ETA every N edges (0 to "
+                         "disable them); the edge counter itself still "
+                         "updates every edge. On a live terminal this all "
+                         "happens on one in-place line; when output is "
+                         "redirected (no live terminal to update), a "
+                         "snapshot line is logged every N edges instead")
     p.add_argument("-y", "--yes", action="store_true",
                     help="if --out already exists, overwrite and start a "
                          "fresh capture without asking for confirmation")
     args = p.parse_args()
-    if args.flush_every < 1:
-        p.error("--flush-every must be >= 1")
 
+    # --- output plumbing -------------------------------------------------
+    # A single mutable flag tracks whether the in-place progress line is
+    # sitting on the current row. Anything else that wants to print (a
+    # status line, a warning, an error) goes through log()/warn() so it
+    # always lands on a clean line instead of gluing itself onto the
+    # progress counter.
+    progress_open = False
+    last_len = 0
+    show_progress = sys.stdout.isatty()
+
+    def log(msg=""):
+        nonlocal progress_open
+        if progress_open:
+            sys.stdout.write("\n")
+            progress_open = False
+        print(msg)
+
+    def warn(msg):
+        nonlocal progress_open
+        if progress_open:
+            sys.stdout.write("\n")
+            progress_open = False
+        print(msg, file=sys.stderr)
+
+    def die(msg):
+        warn(msg)
+        sys.exit(1)
+
+    count_width = len(str(args.count))
+
+    def show(content):
+        # Overwrites the current line in place. content's length varies
+        # edge to edge (the poisson verdict and ETA strings aren't fixed
+        # width), so pad out to the previous line's length rather than
+        # relying on a terminal clear-line escape that not every console
+        # honors.
+        nonlocal progress_open, last_len
+        if not show_progress:
+            return
+        pad = max(0, last_len - len(content))
+        sys.stdout.write("\r" + content + " " * pad)
+        sys.stdout.flush()
+        last_len = len(content)
+        progress_open = True
+
+    # CPM / Poisson check / ETA are computed here, on demand, not on every
+    # edge — see compute_stats()'s call site below, which only calls this
+    # every --stats-every edges. The result is cached in stats_suffix and
+    # reused as-is on the edges in between, so the live line still updates
+    # every edge (cheap: just the counter and percentage) without redoing
+    # the CPM/Poisson/ETA math it hasn't been asked to refresh yet.
+    stats_suffix = ""
+
+    def compute_stats(n_done):
+        elapsed_us = monotonic - monotonic_start
+        mean_us = elapsed_us / diff_count
+        cpm = 60e6 * diff_count / elapsed_us if elapsed_us > 0 else float("nan")
+        verdict = poisson_status(mean_us, diff_count, bounce_counts)
+        remaining = args.count - n_done
+        if remaining <= 0:
+            eta_str = "done"
+        elif cpm and cpm > 0 and not math.isnan(cpm):
+            eta_seconds = remaining / cpm * 60
+            finish_time = datetime.now() + timedelta(seconds=eta_seconds)
+            eta_str = (f"{format_duration(eta_seconds)} remaining, "
+                       f"ETA {finish_time.strftime('%Y-%m-%d %H:%M')}")
+        else:
+            eta_str = "ETA: calculating"
+        return f" — {cpm:.2f} CPM, poisson check: {verdict}, {eta_str}"
+
+    def progress_line(n_done):
+        pct = 100.0 * n_done / args.count
+        return (f"  {n_done:>{count_width}}/{args.count} edges "
+                f"({pct:5.1f}%){stats_suffix}")
+
+    # --- pre-flight --------------------------------------------------------
     if os.path.exists(args.out):
         if args.yes:
-            print(f"{args.out} already exists — overwriting (--yes given).")
+            log(f"{args.out} already exists — overwriting (--yes given).")
         else:
-            print(f"{args.out} already exists. One capture is one "
-                  "continuous, uninterrupted run from edge 0, so continuing "
-                  "it isn't an option — but it can be overwritten and "
-                  "restarted from edge 0 here.")
+            log(f"{args.out} already exists. One capture is one continuous, "
+                "uninterrupted run from edge 0, so continuing it isn't an "
+                "option — but it can be overwritten and restarted from "
+                "edge 0 here.")
             try:
                 reply = input(f"Overwrite {args.out} and start a new "
                                "capture? [y/N]: ").strip().lower()
             except EOFError:
                 reply = ""
             if reply not in ("y", "yes"):
-                print("Not overwriting. Choose a different --out, delete "
-                      "the file yourself, or pass --yes to skip this "
-                      "prompt.", file=sys.stderr)
-                sys.exit(1)
+                die("Not overwriting. Choose a different --out, delete the "
+                    "file yourself, or pass --yes to skip this prompt.")
 
-    print(f"Listening for device on {args.port}...")
+    log("Entropy32 Recorder capture")
+    log(f"  port     {args.port} @ {args.baud} baud")
+    log(f"  output   {args.out}")
+    log(f"  target   {args.count} edges")
+    log()
+    log(f"Waiting for device on {args.port}...")
+
     ser = serial.Serial(args.port, args.baud, timeout=10)
     n = 0
     prev_raw = None
     monotonic = 0
     monotonic_start = None
-    diffs_us = []
+    diff_count = 0
+    bounce_counts = {t_ms: 0 for t_ms in POISSON_CHECK_THRESHOLDS_MS}
     connected = False
     consecutive_timeouts = 0
     interrupted = False
-    since_flush = 0
     capture_start_utc = None
     capture_end_utc = None
     with open(args.out, "w", newline="") as f:
@@ -183,48 +264,43 @@ def main():
                 if not raw:
                     consecutive_timeouts += 1
                     if not connected:
-                        print("No data for 10s — check wiring/port.", file=sys.stderr)
+                        warn("No data for 10s — check wiring/port.")
                     elif consecutive_timeouts % IDLE_HEARTBEAT_TIMEOUTS == 0:
                         idle_s = consecutive_timeouts * 10
-                        print(f"Still connected, no edge for {idle_s}s — "
-                              "normal for a quiet source, not a problem by itself.",
-                              file=sys.stderr)
+                        warn(f"Still connected, no edge for {idle_s}s — "
+                             "normal for a quiet source, not a problem by itself.")
                     continue
                 if not connected:
-                    print("Device acknowledged.")
+                    log("Device connected — receiving edges.")
                 connected = True
                 consecutive_timeouts = 0
                 line = raw.decode(errors="replace").strip()
                 if not line or line == "edge_index,timestamp_us":
                     continue
                 if line == "OVERRUN_DETECTED":
-                    print("!! Board reported a dropped edge — this capture is "
-                          "INVALID per the evidence protocol. Restart with a "
-                          f"fresh --out; the {n} edge(s) already written to "
-                          f"{args.out} cannot be used.", file=sys.stderr)
-                    sys.exit(1)
+                    die("!! Board reported a dropped edge — this capture is "
+                        "INVALID per the evidence protocol. Restart with a "
+                        f"fresh --out; the {n} edge(s) already written to "
+                        f"{args.out} cannot be used.")
                 try:
                     idx_str, ts_str = line.split(",")
                     idx = int(idx_str)
                     ts = int(ts_str)
                 except ValueError:
-                    print(f"!! Unparseable serial line: {line!r} — a garbled "
-                          "line can't be distinguished from a dropped or "
-                          "corrupted edge, so this capture is INVALID per "
-                          f"the evidence protocol. Restart with a fresh "
-                          f"--out; the {n} edge(s) already written to "
-                          f"{args.out} cannot be used.", file=sys.stderr)
-                    sys.exit(1)
+                    die(f"!! Unparseable serial line: {line!r} — a garbled "
+                        "line can't be distinguished from a dropped or "
+                        "corrupted edge, so this capture is INVALID per the "
+                        f"evidence protocol. Restart with a fresh --out; "
+                        f"the {n} edge(s) already written to {args.out} "
+                        "cannot be used.")
 
                 if idx != n:
-                    print(f"!! Device reported edge_index {idx} but {n} "
-                          "edge(s) have been received so far — a serial "
-                          "line was dropped, duplicated, or reordered in "
-                          "transit. This capture is INVALID per the "
-                          f"evidence protocol. Restart with a fresh --out; "
-                          f"the {n} edge(s) already written to {args.out} "
-                          "cannot be used.", file=sys.stderr)
-                    sys.exit(1)
+                    die(f"!! Device reported edge_index {idx} but {n} "
+                        "edge(s) have been received so far — a serial line "
+                        "was dropped, duplicated, or reordered in transit. "
+                        "This capture is INVALID per the evidence protocol. "
+                        f"Restart with a fresh --out; the {n} edge(s) "
+                        f"already written to {args.out} cannot be used.")
 
                 if prev_raw is None:
                     monotonic = 0
@@ -233,61 +309,49 @@ def main():
                 else:
                     delta = wrap_delta(ts, prev_raw)
                     if near_wrap(delta):
-                        print(f"!! Gap before edge {n} is within {WRAP_WARN_MARGIN_US // 1_000_000}s "
-                              "of a full timer-wrap period — the reconstructed "
-                              "monotonic_timestamp_us for this edge may be wrong "
-                              "(possible missed multi-wrap gap). Inspect this run "
-                              "before trusting it.", file=sys.stderr)
+                        warn(f"!! Gap before edge {n} is within "
+                             f"{WRAP_WARN_MARGIN_US // 60_000_000} min of a "
+                             "full timer-wrap period — the reconstructed "
+                             "monotonic_timestamp_us for this edge may be "
+                             "wrong (possible missed multi-wrap gap). "
+                             "Inspect this run before trusting it.")
                     monotonic += delta
-                    diffs_us.append(delta)
+                    diff_count += 1
+                    for t_ms in POISSON_CHECK_THRESHOLDS_MS:
+                        if delta < t_ms * 1000:
+                            bounce_counts[t_ms] += 1
                 prev_raw = ts
                 capture_end_utc = datetime.now(timezone.utc)
 
                 writer.writerow([n, ts, monotonic])
                 f.flush()
-                since_flush += 1
-                synced = since_flush >= args.flush_every
-                if synced:
-                    os.fsync(f.fileno())
-                    since_flush = 0
+                os.fsync(f.fileno())
                 n += 1
-                flush_note = " [synced to disk]" if synced else ""
-                print(f"  edge {n - 1} captured ({n}/{args.count}, "
-                      f"{100.0 * n / args.count:.1f}%){flush_note}")
-                if args.stats_every and n % args.stats_every == 0:
-                    elapsed_us = monotonic - monotonic_start
-                    cpm = 60e6 * len(diffs_us) / elapsed_us if elapsed_us > 0 else float("nan")
-                    verdict = poisson_status(diffs_us) if len(diffs_us) >= 10 else "n/a (too few samples yet)"
-                    remaining = args.count - n
-                    if remaining <= 0:
-                        eta_str = "done"
-                    elif cpm and cpm > 0 and not math.isnan(cpm):
-                        eta_seconds = remaining / cpm * 60
-                        finish_time = datetime.now() + timedelta(seconds=eta_seconds)
-                        eta_str = (f"{format_duration(eta_seconds)} remaining, "
-                                   f"ETA {finish_time.strftime('%Y-%m-%d %H:%M')}")
-                    else:
-                        eta_str = "ETA: calculating (not enough data yet)"
-                    pct = 100.0 * n / args.count
-                    print(f"== {n}/{args.count} edges ({pct:.1f}%) — "
-                          f"~{cpm:.2f} CPM, poisson check: {verdict}, {eta_str}")
+
+                if args.stats_every and diff_count > 0 and n % args.stats_every == 0:
+                    stats_suffix = compute_stats(n)
+                    # On a live terminal the line below already carries this
+                    # and refreshes every edge; without one (output piped
+                    # to a file), that update is invisible, so log this
+                    # snapshot as a permanent line instead.
+                    if not show_progress:
+                        log(progress_line(n))
+
+                show(progress_line(n))
         except KeyboardInterrupt:
             interrupted = True
-        finally:
-            if since_flush:
-                f.flush()
-                os.fsync(f.fileno())
-                print(f"Flushed {since_flush} pending edge(s) to disk before exit.",
-                      file=sys.stderr)
+
+    if progress_open:
+        sys.stdout.write("\n")
+        progress_open = False
 
     if interrupted:
-        print(f"\nInterrupted by user after {n} edge(s) — all of it is "
-              f"safely on disk, but per the evidence protocol this capture "
-              "is not valid evidence (not a complete, uninterrupted run). "
-              "Start a fresh run under a new --out to try again.",
-              file=sys.stderr)
+        warn(f"\nInterrupted by user after {n} edge(s) — all of it is "
+             f"safely on disk, but per the evidence protocol this capture "
+             "is not valid evidence (not a complete, uninterrupted run). "
+             "Start a fresh run under a new --out to try again.")
     else:
-        print(f"Done. {n} edges written to {args.out}")
+        log(f"Capture complete: {n} edges written to {args.out}")
         status = {
             "raw_edge_count": n,
             "capture_start_utc": capture_start_utc.isoformat() if capture_start_utc else None,
@@ -296,7 +360,7 @@ def main():
             "baud": args.baud,
             # Always 0 here by construction, not by counting: the board's
             # OVERRUN_DETECTED, an unparseable line, and an edge_index gap
-            # all sys.exit(1) immediately above rather than incrementing a
+            # all die() immediately above rather than incrementing a
             # counter and continuing, so any run that reaches this point had
             # zero of each - see the module docstring on why this protocol
             # doesn't soft-skip bad events.
@@ -308,7 +372,7 @@ def main():
         with open(sp, "w") as sf:
             json.dump(status, sf, indent=2)
             sf.write("\n")
-        print(f"Wrote {sp}")
+        log(f"Wrote {sp}")
 
 
 if __name__ == "__main__":

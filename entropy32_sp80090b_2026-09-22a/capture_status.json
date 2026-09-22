@@ -1,0 +1,10 @@
+{
+  "raw_edge_count": 10000,
+  "capture_start_utc": "2026-09-22T09:23:53.250061+00:00",
+  "capture_end_utc": "2026-09-22T19:23:34.394460+00:00",
+  "port": "COM13",
+  "baud": 115200,
+  "buffer_overrun_count": 0,
+  "transport_drop_count": 0,
+  "capture_status": "COMPLETE"
+}

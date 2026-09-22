@@ -12,8 +12,8 @@
   "accepted_intervals": 9999,
   "complete_pairs": 4999,
   "ties": 0,
-  "comparison_zeroes": 2472,
-  "comparison_ones": 2527,
+  "comparison_zeroes": 2543,
+  "comparison_ones": 2456,
   "comparison_bits": 4999,
   "dangling_unpaired_intervals": 1
 }

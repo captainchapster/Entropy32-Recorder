@@ -83,3 +83,13 @@ _autosave-*
 
 # Manual additions
 __pycache__
+
+# Loose capture/derive/NIST working files (tools/*.py write these) -
+# only the assembled entropy32_sp80090b_<capture-id>/ packages that
+# tools/package_evidence.py produces from them are meant to be committed.
+tools/raw_edges.csv
+tools/raw_edges.status.json
+tools/derived/
+tools/nist_stdout.txt
+tools/nist_stderr.txt
+tools/nist_exit_status.txt

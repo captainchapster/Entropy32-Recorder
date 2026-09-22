@@ -33,10 +33,9 @@ Plus's seed generation.
   `monotonic_timestamp_us` is that value unwrapped into an ever-increasing
   64-bit microsecond count, reconstructed on the host (via
   `tools/edge_timing.py`) so the firmware/ISR stays minimal. Every row is
-  flushed to the OS immediately and fsynced to disk every `--flush-every`
-  edges (default: every edge, negligible cost at this source's event
-  rate); a final fsync always happens on Ctrl+C or normal completion, so
-  nothing buffered is ever lost short of an actual power loss. One
+  flushed and fsynced to disk as soon as it's written — negligible cost at
+  this source's event rate, and each edge is an irreplaceable physical
+  event, so nothing is ever buffered short of an actual power loss. One
   capture is one continuous, uninterrupted run from edge 0 — per the
   evidence protocol, there is no resume; the tool refuses to run at all
   if `--out` already has data, and an interrupted capture must be
@@ -53,7 +52,7 @@ Plus's seed generation.
   compares the inter-arrival distribution against a Poisson expectation to
   flag comparator bounce/chatter. Run this before feeding a capture into
   NIST STS / SP 800-90B tooling:
-  `python tools/check_edges.py raw_edges.csv`.
+  `python tools/check_edges.py tools/raw_edges.csv`.
 - **`tools/derive_evidence.py`** — reconstructs Entropy32's actual
   bit-extraction (200us reject filter, non-overlapping interval pairing,
   second-longer=1/second-shorter=0, ties discarded) per
@@ -61,7 +60,7 @@ Plus's seed generation.
   producing the protocol's `derived/` package — `all_intervals_us.csv`,
   `firmware_accepted_intervals_us.csv`, `comparison_bits.bin`,
   `derivation_report.json`.
-  `python tools/derive_evidence.py raw_edges.csv --out-dir derived/ --source-dir ../entropy32_plus`.
+  `python tools/derive_evidence.py tools/raw_edges.csv --out-dir tools/derived --source-dir ../entropy32_plus`.
   `comparison_bits.bin` is ready for `ea_non_iid -i -v comparison_bits.bin 1`
   (bits_per_symbol=1, per the protocol's §8 — not a byte-per-symbol
   truncation). `--source-dir` (optional but recommended) points at a local
@@ -82,6 +81,8 @@ Plus's seed generation.
 
 ## Hardware
 
+![Assembled PCB](images/schematic.svg)
+
 The board pairs a Geiger tube's LM393 comparator output with an ATmega328P
 (D2, using the board's existing pull-down for bias). Design files are in
 [`KiCad/`](KiCad/), including BOM, designators, netlist, and pick-and-place
@@ -89,43 +90,89 @@ files under `KiCad/production/`.
 
 ## Usage
 
+All commands below assume you're in the repo root (`entropy32_recorder/`)
+and refer to files under `tools/` explicitly — that avoids the most common
+mistake, running a later step from the wrong directory against a bare
+filename that only exists one level down.
+
 1. Flash `entropy32_recorder.ino` to the board.
-2. Run the capture tool:
+2. Install the one Python dependency, then run the capture tool:
 
    ```
    pip install pyserial
-   python tools/capture_serial_to_csv.py --port COM5 --count 2000
+   python tools/capture_serial_to_csv.py --port COM5 --count 2000 --out tools/raw_edges.csv
    ```
 
+   (`--port` is a COM port like `COM5` on Windows, or a device path like
+   `/dev/ttyUSB0` on Linux.) This writes `tools/raw_edges.csv` and, once
+   the run completes fully, a `tools/raw_edges.status.json` sibling.
 3. If the board reports `OVERRUN_DETECTED`, or the capture stops for any
    other reason (crash, USB drop, closing the terminal), that run is
    invalid per the evidence protocol — one capture is one continuous,
    uninterrupted run from edge 0. Start over under a new `--out`; there
-   is no resume.
+   is no resume. Don't reuse `tools/raw_edges.csv` as the target for a new
+   capture once an earlier one has already been packaged (step 7) — that
+   overwrites the file the earlier package's hashes were computed from.
 4. Sanity-check the result before running heavier statistical tests:
 
    ```
-   python tools/check_edges.py raw_edges.csv
+   python tools/check_edges.py tools/raw_edges.csv
    ```
 
 5. Reconstruct Entropy32's actual bit stream:
 
    ```
-   python tools/derive_evidence.py raw_edges.csv --out-dir derived/ --source-dir ../entropy32_plus
-   ea_non_iid -i -v derived/comparison_bits.bin 1
+   python tools/derive_evidence.py tools/raw_edges.csv --out-dir tools/derived --source-dir ../entropy32_plus
    ```
 
-   Save `ea_non_iid`'s stdout/stderr and note its exit status — the
-   next step needs them.
-6. Assemble the immutable evidence package:
+   This writes `tools/derived/comparison_bits.bin` (and the other
+   `derived/` files) ready for the NIST tool below.
+6. Run the NIST non-IID test suite against `comparison_bits.bin`.
+
+   `ea_non_iid` is a Linux build — on Windows you'll need
+   [WSL](https://learn.microsoft.com/en-us/windows/wsl/install)
+   (`wsl --install`, one-time). Build it once, from inside WSL (or any
+   Linux/macOS shell):
+
+   ```bash
+   sudo apt update && sudo apt install -y build-essential libbz2-dev
+   git clone https://github.com/usnistgov/SP800-90B_EntropyAssessment.git
+   cd SP800-90B_EntropyAssessment
+   git checkout 68ed165fd7a3eeef26b87a546ba23f338e82a3f3  # pinned v1.1.8, see protocol §8
+   make
+   cd selftest && ./selftest && cd ..
+   make non_iid
+   ```
+
+   The binaries land in `cpp/`, not the repo root — run `ea_non_iid` from
+   there. From WSL, your Windows checkout is under `/mnt/<drive letter>/...`
+   (e.g. `/mnt/d/Programming/entropy32_recorder`). Run it and save its
+   stdout/stderr/exit status verbatim — the next step needs all three:
+
+   ```bash
+   cd SP800-90B_EntropyAssessment/cpp
+   REPO=/mnt/d/Programming/entropy32_recorder
+   ./ea_non_iid -i -v "$REPO/tools/derived/comparison_bits.bin" 1 \
+     > "$REPO/tools/nist_stdout.txt" 2> "$REPO/tools/nist_stderr.txt"
+   echo $? > "$REPO/tools/nist_exit_status.txt"
+   g++ --version | head -1   # note this down for --nist-compiler-version below
+   ```
+
+7. Assemble the immutable evidence package:
 
    ```
    python tools/package_evidence.py \
-     --raw raw_edges.csv --derived-dir derived/ --capture-id <your-id> \
+     --raw tools/raw_edges.csv --derived-dir tools/derived --capture-id <your-id> \
      --nist-command "./ea_non_iid -i -v comparison_bits.bin 1" \
-     --nist-stdout nist_stdout.txt --nist-stderr nist_stderr.txt \
-     --nist-exit-status 0
+     --nist-stdout tools/nist_stdout.txt --nist-stderr tools/nist_stderr.txt \
+     --nist-exit-status 0 --nist-compiler-version "<g++ --version output from step 6>"
    ```
+
+   `--capture-status` doesn't need to be passed explicitly — it's
+   auto-detected from `tools/raw_edges.status.json`. This writes
+   `entropy32_sp80090b_<your-id>/` in the repo root; that directory,
+   not the loose `tools/raw_edges.csv` / `tools/derived/` / `tools/nist_*`
+   files that fed it, is what should get committed as the evidence record.
 
    Fill in whichever `manifest.json` fields it lists as left `null`
    (hardware revision, physical source, environment) by hand — see
