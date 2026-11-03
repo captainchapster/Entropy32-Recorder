@@ -1,0 +1,10 @@
+{
+  "raw_edge_count": 2000000,
+  "capture_start_utc": "2026-10-03T02:14:42.595284+00:00",
+  "capture_end_utc": "2026-10-26T00:28:47.604149+00:00",
+  "port": "/dev/ttyUSB0",
+  "baud": 115200,
+  "buffer_overrun_count": 0,
+  "transport_drop_count": 0,
+  "capture_status": "COMPLETE"
+}

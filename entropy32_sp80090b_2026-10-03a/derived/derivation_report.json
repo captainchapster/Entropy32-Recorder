@@ -1,0 +1,19 @@
+{
+  "source_repo": "https://github.com/captainchapster/Entropy32-Plus.git",
+  "source_commit": "2b9893aed3be7f58897c7f1f985c79f62c725c9a",
+  "entropy32_firmware_blob_sha": "f0b814c38429c023ea9d93b5703273b514555c8c2e0654083db9e3d80dfbbc90",
+  "min_interval_us": 200,
+  "pairing": "NON_OVERLAPPING",
+  "tie_rule": "DISCARD_PAIR",
+  "bit_rule": "SECOND_LONGER=1;SECOND_SHORTER=0",
+  "raw_edges": 2000000,
+  "unfiltered_intervals": 1999999,
+  "short_interval_rejections": 0,
+  "accepted_intervals": 1999999,
+  "complete_pairs": 999999,
+  "ties": 0,
+  "comparison_zeroes": 500205,
+  "comparison_ones": 499794,
+  "comparison_bits": 999999,
+  "dangling_unpaired_intervals": 1
+}

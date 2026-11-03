@@ -127,7 +127,7 @@ def main():
     if capture_status is not None:
         shutil.copy2(status_path, os.path.join(out_dir, "capture_status.json"))
     else:
-        with open(os.path.join(out_dir, "capture_status.json"), "w") as f:
+        with open(os.path.join(out_dir, "capture_status.json"), "w", newline="\n") as f:
             json.dump({"capture_status": "unknown"}, f, indent=2)
             f.write("\n")
 
@@ -140,13 +140,13 @@ def main():
         f"nist_tool_commit: {args.nist_tool_commit}",
         f"compiler_version: {args.nist_compiler_version or 'unknown'}",
     ]
-    with open(os.path.join(out_dir, "nist", "TOOLCHAIN.txt"), "w") as f:
+    with open(os.path.join(out_dir, "nist", "TOOLCHAIN.txt"), "w", newline="\n") as f:
         f.write("\n".join(toolchain_lines) + "\n")
-    with open(os.path.join(out_dir, "nist", "comparison_non_iid.command.txt"), "w") as f:
+    with open(os.path.join(out_dir, "nist", "comparison_non_iid.command.txt"), "w", newline="\n") as f:
         f.write(args.nist_command + "\n")
     shutil.copy2(args.nist_stdout, os.path.join(out_dir, "nist", "comparison_non_iid.stdout.txt"))
     shutil.copy2(args.nist_stderr, os.path.join(out_dir, "nist", "comparison_non_iid.stderr.txt"))
-    with open(os.path.join(out_dir, "nist", "comparison_non_iid.exit_status.txt"), "w") as f:
+    with open(os.path.join(out_dir, "nist", "comparison_non_iid.exit_status.txt"), "w", newline="\n") as f:
         f.write(str(args.nist_exit_status) + "\n")
 
     manifest = {
@@ -208,7 +208,7 @@ def main():
         },
     }
     manifest_path = os.path.join(out_dir, "manifest.json")
-    with open(manifest_path, "w") as f:
+    with open(manifest_path, "w", newline="\n") as f:
         json.dump(manifest, f, indent=2)
         f.write("\n")
 
@@ -219,7 +219,10 @@ def main():
             rel = os.path.relpath(full, out_dir).replace(os.sep, "/")
             sums.append((sha256_file(full), rel))
     sums.sort(key=lambda x: x[1])
-    with open(os.path.join(out_dir, "SHA256SUMS"), "w") as f:
+    # newline="\n" on every file this script writes: on Windows the default
+    # CRLF puts a '\r' into each SHA256SUMS filename, so `sha256sum -c`
+    # can't find any of them on Linux/macOS.
+    with open(os.path.join(out_dir, "SHA256SUMS"), "w", newline="\n") as f:
         for digest, rel in sums:
             f.write(f"{digest}  {rel}\n")
 

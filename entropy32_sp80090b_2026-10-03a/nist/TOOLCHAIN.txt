@@ -1,0 +1,4 @@
+nist_tool_repository: usnistgov/SP800-90B_EntropyAssessment
+nist_tool_version: v1.1.8
+nist_tool_commit: 68ed165fd7a3eeef26b87a546ba23f338e82a3f3
+compiler_version: g++ (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0

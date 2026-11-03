@@ -1,0 +1,4 @@
+# Evidence packages are hashed byte-for-byte (SHA256SUMS, manifest.json).
+# Never let core.autocrlf rewrite their line endings on commit or
+# checkout, or the stored files stop matching their own digests.
+entropy32_sp80090b_*/** -text
