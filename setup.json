@@ -1,0 +1,28 @@
+{
+  "manifest": {
+    "hardware_revision": "v1 (the only revision of the Entropy32 Recorder design in this repo's KiCad/)",
+    "board_identifier": null,
+    "geiger_counter_model": "GMC-320S",
+    "physical_source_type": "background radiation + 2% thoriated tungsten welding electrodes, cut into pieces",
+    "source_identifier_if_any": null,
+    "source_geometry": "electrode pieces loose in a glass jar",
+    "source_distance": "jar placed beside the detector; distance not measured",
+    "shielding_or_enclosure": "source contained in a glass jar; no detector shielding recorded",
+    "compiler_version": null,
+    "arduino_core_or_runtime_version": null,
+    "clock_source": null,
+    "nominal_clock_hz": 16000000,
+    "measured_clock_hz_if_known": null,
+    "timestamp_resolution": "4 us (Arduino AVR micros(): Timer0, prescaler 64, 16 MHz)",
+    "ambient_temperature_if_available": null,
+    "supply_voltage_if_available": null,
+    "other_environment_notes": "Recorder D2 input fed from the GMC-320S 3.5 mm audio jack. GMC-320S ran on its own internal battery, topped up periodically over USB from a portable charger during the capture. Recorder connected over USB serial to a laptop running tools/capture_serial_to_csv.py. Detector dead time estimated at ~750 us on an oscilloscope."
+  },
+  "check_edges": {
+    "dead_time_ns": 720000
+  },
+  "tools": {
+    "firmware_dir": "../entropy32_plus",
+    "ea_non_iid": "~/nist/SP800-90B_EntropyAssessment/cpp/ea_non_iid"
+  }
+}

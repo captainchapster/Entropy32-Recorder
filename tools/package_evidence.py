@@ -90,8 +90,19 @@ def main():
                          "nist/TOOLCHAIN.txt, NOT manifest.json's top-level "
                          "compiler_version (that field is the recorder "
                          "firmware's own toolchain, a separate unknown)")
+    p.add_argument("--setup",
+                    help="setup.json describing the rig (hardware, source, "
+                         "environment): its \"manifest\" section fills in the "
+                         "manifest fields this script would otherwise leave "
+                         "null, so they're written once rather than "
+                         "hand-edited into every package")
     p.add_argument("--out-dir", help="default: entropy32_sp80090b_<capture-id>/")
     args = p.parse_args()
+
+    setup_fields = {}
+    if args.setup:
+        with open(args.setup) as f:
+            setup_fields = json.load(f).get("manifest", {})
 
     out_dir = args.out_dir or f"entropy32_sp80090b_{args.capture_id}"
     if os.path.exists(out_dir):
@@ -207,6 +218,19 @@ def main():
             "raw/raw_edges.csv": sha256_file(args.raw),
         },
     }
+    # Setup values may only fill fields that are null above - everything
+    # else was determined from the capture itself and must not be
+    # overridable by a hand-written file.
+    for key, value in setup_fields.items():
+        if key not in manifest:
+            shutil.rmtree(out_dir)
+            p.error(f"--setup: {key!r} is not a manifest field (typo?)")
+        if manifest[key] is not None:
+            shutil.rmtree(out_dir)
+            p.error(f"--setup: {key!r} is determined from the capture itself "
+                    f"({manifest[key]!r}) and can't be set from setup.json")
+        manifest[key] = value
+
     manifest_path = os.path.join(out_dir, "manifest.json")
     with open(manifest_path, "w", newline="\n") as f:
         json.dump(manifest, f, indent=2)
@@ -230,8 +254,9 @@ def main():
 
     null_fields = [k for k, v in manifest.items() if v is None]
     if null_fields:
-        print("\nmanifest.json fields left null (fill in by hand - not "
-              "guessed):", file=sys.stderr)
+        print("\nmanifest.json fields left null (unknown - not guessed; "
+              "record them in setup.json's \"manifest\" section once known):",
+              file=sys.stderr)
         for k in null_fields:
             print(f"  - {k}", file=sys.stderr)
 

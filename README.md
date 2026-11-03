@@ -73,9 +73,16 @@ Plus's seed generation.
   a separately-run `ea_non_iid` pass: copies `raw/` and `derived/` in,
   records the exact NIST command/toolchain/exit status under `nist/`,
   writes `capture_status.json` and a `manifest.json` (fields it can't
-  know — hardware, physical source, environment — are left `null` and
-  listed on stdout for manual completion), and computes a `SHA256SUMS`
-  covering every file in the package.
+  know from the data — hardware, physical source, environment — are
+  filled from `setup.json` via `--setup`, otherwise left `null`), and
+  computes a `SHA256SUMS` covering every file in the package.
+- **`tools/verify_evidence.py`** — independently checks a finished
+  package: hashes, raw structure, a byte-for-byte re-derivation, and the
+  saved NIST run. The one command a replicator needs.
+- **`tools/make_evidence.py`** — runs everything from a finished capture
+  to a verified package (check, derive, NIST via WSL, package, verify).
+- **`setup.json`** — the recording rig's description (manifest fields)
+  and local tool paths, read by `make_evidence.py`.
 - **`KiCad/`** — PCB design (schematic, layout, 3D models, and
   fabrication/production outputs for the Entropy32 Recorder board).
 
@@ -90,55 +97,47 @@ files under `KiCad/production/`.
 
 ## Usage
 
-All commands below assume you're in the repo root (`entropy32_recorder/`)
-and refer to files under `tools/` explicitly — that avoids the most common
-mistake, running a later step from the wrong directory against a bare
-filename that only exists one level down.
+All commands below run from the repo root (`entropy32_recorder/`).
 
-1. Flash `entropy32_recorder.ino` to the board.
-2. Install the one Python dependency, then run the capture tool:
+### Verifying a published package
 
-   ```
-   pip install pyserial
-   python tools/capture_serial_to_csv.py --port COM5 --out tools/raw_edges.csv
-   ```
+If you're checking someone else's result, this is the only command you
+need (Python 3.8+, no dependencies):
 
-   (`--port` is a COM port like `COM5` on Windows, or a device path like
-   `/dev/ttyUSB0` on Linux.) This writes `tools/raw_edges.csv` and, once
-   the run completes fully, a `tools/raw_edges.status.json` sibling.
+```
+python tools/verify_evidence.py entropy32_sp80090b_2026-10-03a
+```
 
-   By default it runs until the protocol's stop gate is met — 1,000,000
-   comparison bits, counted live using the same reconstruction as step 5
-   — so it can't stop one bit short the way a fixed edge count can
-   (2,000,000 edges yields only 999,999 bits). For a quick pipeline smoke
-   test, stop after a fixed number of edges instead with `--count 2000`.
-3. If the board reports `OVERRUN_DETECTED`, or the capture stops for any
-   other reason (crash, USB drop, closing the terminal), that run is
-   invalid per the evidence protocol — one capture is one continuous,
-   uninterrupted run from edge 0. Start over under a new `--out`; there
-   is no resume. Don't reuse `tools/raw_edges.csv` as the target for a new
-   capture once an earlier one has already been packaged (step 7) — that
-   overwrites the file the earlier package's hashes were computed from.
-4. Sanity-check the result before running heavier statistical tests:
+It checks every file against `SHA256SUMS`, checks the raw capture's
+structure (no missing edges, consistent timer unwrapping), re-derives the
+bit stream from `raw/raw_edges.csv` and requires it to match byte for
+byte, and checks the saved NIST output belongs to this package's
+`comparison_bits.bin` and reports all ten estimators. It ends with
+`VERIFIED`, `VERIFIED as a PILOT package` (consistent, but below the
+protocol's 1,000,000-sample gate), or `FAILED`, and exits non-zero on
+failure. Two optional, slower checks:
 
-   ```
-   python tools/check_edges.py tools/raw_edges.csv
-   ```
+```
+python tools/verify_evidence.py entropy32_sp80090b_2026-10-03a \
+  --firmware-dir ../entropy32_plus \
+  --ea-non-iid ~/SP800-90B_EntropyAssessment/cpp/ea_non_iid
+```
 
-5. Reconstruct Entropy32's actual bit stream:
+`--firmware-dir` (any clone of
+[Entropy32-Plus](https://github.com/captainchapster/Entropy32-Plus))
+confirms the firmware at the commit the derivation claims is the one whose
+hash is recorded. `--ea-non-iid` re-runs NIST (built as below) and
+requires identical output; on Windows a `~/...` or `/...` path runs inside
+WSL automatically.
 
-   ```
-   python tools/derive_evidence.py tools/raw_edges.csv --out-dir tools/derived --source-dir ../entropy32_plus
-   ```
+### One-time setup for recording
 
-   This writes `tools/derived/comparison_bits.bin` (and the other
-   `derived/` files) ready for the NIST tool below.
-6. Run the NIST non-IID test suite against `comparison_bits.bin`.
-
-   `ea_non_iid` is a Linux build — on Windows you'll need
-   [WSL](https://learn.microsoft.com/en-us/windows/wsl/install)
-   (`wsl --install`, one-time). Build it once, from inside WSL (or any
-   Linux/macOS shell):
+1. Flash `entropy32_recorder.ino` to the board, and `pip install pyserial`.
+2. Clone the Entropy32 firmware next to this repo, so the derivation can
+   be pinned to it: `git clone https://github.com/captainchapster/Entropy32-Plus.git ../entropy32_plus`
+3. Build the pinned NIST tool. `ea_non_iid` is a Linux build — on Windows
+   use [WSL](https://learn.microsoft.com/en-us/windows/wsl/install)
+   (`wsl --install`, one-time) and run this inside it:
 
    ```bash
    sudo apt update && sudo apt install -y build-essential libbz2-dev
@@ -150,65 +149,60 @@ filename that only exists one level down.
    make non_iid
    ```
 
-   The binaries land in `cpp/`, not the repo root — run `ea_non_iid` from
-   there. From WSL, your Windows checkout is under `/mnt/<drive letter>/...`
-   (e.g. `/mnt/d/Programming/entropy32_recorder`). Run it and save its
-   stdout/stderr/exit status verbatim — the next step needs all three:
+4. Edit [`setup.json`](setup.json): `tools` points at the firmware
+   checkout and the built `cpp/ea_non_iid`; `manifest` describes your rig
+   (detector, source, environment — `null` for anything unknown, never a
+   guess); `check_edges.dead_time_ns` is your detector's dead time, if
+   known. These are written into every package, so you describe the
+   setup once, not per capture.
 
-   ```bash
-   cd SP800-90B_EntropyAssessment/cpp
-   REPO=/mnt/d/Programming/entropy32_recorder
-   ./ea_non_iid -i -v "$REPO/tools/derived/comparison_bits.bin" 1 \
-     > "$REPO/tools/nist_stdout.txt" 2> "$REPO/tools/nist_stderr.txt"
-   echo $? > "$REPO/tools/nist_exit_status.txt"
-   g++ --version | head -1   # note this down for --nist-compiler-version below
-   ```
+### Recording a capture
 
-7. Assemble the immutable evidence package:
+1. Run the capture:
 
    ```
-   python tools/package_evidence.py \
-     --raw tools/raw_edges.csv --derived-dir tools/derived --capture-id <your-id> \
-     --nist-command "./ea_non_iid -i -v comparison_bits.bin 1" \
-     --nist-stdout tools/nist_stdout.txt --nist-stderr tools/nist_stderr.txt \
-     --nist-exit-status 0 --nist-compiler-version "<g++ --version output from step 6>"
+   python tools/capture_serial_to_csv.py --port COM5 --out tools/raw_edges.csv
    ```
 
-   `--capture-status` doesn't need to be passed explicitly — it's
-   auto-detected from `tools/raw_edges.status.json`. This writes
-   `entropy32_sp80090b_<your-id>/` in the repo root; that directory,
-   not the loose `tools/raw_edges.csv` / `tools/derived/` / `tools/nist_*`
-   files that fed it, is what should get committed as the evidence record.
+   (`COM5` on Windows, `/dev/ttyUSB0` on Linux.) By default it runs until
+   the protocol's stop gate — 1,000,000 comparison bits, counted live
+   with the same reconstruction the derivation uses — so it can't stop one
+   bit short the way a fixed edge count can (2,000,000 edges yields only
+   999,999 bits). For a quick smoke test use `--count 2000` instead.
 
-   Fill in whichever `manifest.json` fields it lists as left `null`
-   (hardware revision, physical source, environment) by hand — see
-   `entropy32_evidence_protocol.md` for what the full package and
-   restart testing require beyond this.
-8. Verify the package before committing it — and, if you're replicating
-   someone else's result, this is the only step you need:
+   If the board reports `OVERRUN_DETECTED` or the capture stops for any
+   other reason, that run is invalid — one capture is one continuous run
+   from edge 0, with no resume. Start over.
+2. Build and verify the evidence package:
 
    ```
-   python tools/verify_evidence.py entropy32_sp80090b_<your-id>
+   python tools/make_evidence.py
    ```
 
-   This checks every file against `SHA256SUMS`, checks the raw capture's
-   structure (no missing edges, consistent timer unwrapping), re-derives
-   the bit stream from `raw/raw_edges.csv` and requires it to match byte
-   for byte, and checks the saved NIST output belongs to this package's
-   `comparison_bits.bin` and reports all ten estimators. It exits non-zero
-   on any `FAIL`. Two optional, slower checks:
+   This runs the edge sanity check, the derivation, NIST (through WSL on
+   Windows), packaging and verification, recording the NIST tool's commit
+   and compiler from the build itself. It refuses to package an
+   incomplete capture or an unpinned/modified NIST build. The package is
+   named from the capture's start date, e.g. `entropy32_sp80090b_2026-11-20a/`.
+3. Commit the package directory it prints. Once committed it's immutable
+   — never edit it; a new capture gets a new package.
 
-   ```
-   python tools/verify_evidence.py entropy32_sp80090b_<your-id> \
-     --firmware-dir ../entropy32_plus \
-     --ea-non-iid ~/SP800-90B_EntropyAssessment/cpp/ea_non_iid
-   ```
+### Running the steps by hand
 
-   `--firmware-dir` confirms the Entropy32 firmware at the commit the
-   derivation claims really is the one whose hash is recorded (any
-   checkout of that repo works). `--ea-non-iid` re-runs NIST and requires
-   identical output; on Windows a `~/...` or `/...` path runs inside WSL
-   automatically.
+`make_evidence.py` only strings together tools you can also run
+yourself, e.g. to inspect an intermediate result:
+
+```
+python tools/check_edges.py tools/raw_edges.csv --dead-time-ns 720000
+python tools/derive_evidence.py tools/raw_edges.csv --out-dir tools/derived --source-dir ../entropy32_plus
+# in WSL, from SP800-90B_EntropyAssessment/cpp, save stdout/stderr/exit status verbatim:
+./ea_non_iid -i -v /mnt/d/Programming/entropy32_recorder/tools/derived/comparison_bits.bin 1
+python tools/package_evidence.py --raw tools/raw_edges.csv --derived-dir tools/derived \
+  --capture-id <id> --setup setup.json --nist-command "<exact command>" \
+  --nist-stdout <file> --nist-stderr <file> --nist-exit-status <n> \
+  --nist-compiler-version "<compiler>"
+python tools/verify_evidence.py entropy32_sp80090b_<id>
+```
 
 ## Known limitations / best practices for a full campaign
 
