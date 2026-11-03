@@ -178,6 +178,31 @@ filename that only exists one level down.
    (hardware revision, physical source, environment) by hand — see
    `entropy32_evidence_protocol.md` for what the full package and
    restart testing require beyond this.
+8. Verify the package before committing it — and, if you're replicating
+   someone else's result, this is the only step you need:
+
+   ```
+   python tools/verify_evidence.py entropy32_sp80090b_<your-id>
+   ```
+
+   This checks every file against `SHA256SUMS`, checks the raw capture's
+   structure (no missing edges, consistent timer unwrapping), re-derives
+   the bit stream from `raw/raw_edges.csv` and requires it to match byte
+   for byte, and checks the saved NIST output belongs to this package's
+   `comparison_bits.bin` and reports all ten estimators. It exits non-zero
+   on any `FAIL`. Two optional, slower checks:
+
+   ```
+   python tools/verify_evidence.py entropy32_sp80090b_<your-id> \
+     --firmware-dir ../entropy32_plus \
+     --ea-non-iid ~/SP800-90B_EntropyAssessment/cpp/ea_non_iid
+   ```
+
+   `--firmware-dir` confirms the Entropy32 firmware at the commit the
+   derivation claims really is the one whose hash is recorded (any
+   checkout of that repo works). `--ea-non-iid` re-runs NIST and requires
+   identical output; on Windows a `~/...` or `/...` path runs inside WSL
+   automatically.
 
 ## Known limitations / best practices for a full campaign
 

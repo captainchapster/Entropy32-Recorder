@@ -144,47 +144,27 @@ def derive(times):
     return all_intervals, accepted_intervals, comparison_bits, counts
 
 
-def main():
-    p = argparse.ArgumentParser()
-    p.add_argument("csv_path", help="raw_edges.csv from capture_serial_to_csv.py")
-    p.add_argument("--out-dir", default="derived",
-                    help="directory for the derived/ package (default: ./derived)")
-    p.add_argument("--source-dir",
-                    help="path to a local checkout of the firmware this run's "
-                         "200us-filter/pairing/bit-rule constants are claimed "
-                         "to match (e.g. entropy32_plus/) — used to auto-fill "
-                         "--source-repo/--source-commit/--firmware-blob-sha "
-                         "from git and the checked-out .ino, for anything not "
-                         "given explicitly")
-    p.add_argument("--source-repo", help="overrides auto-detection from --source-dir")
-    p.add_argument("--source-commit", help="overrides auto-detection from --source-dir")
-    p.add_argument("--firmware-blob-sha", help="overrides auto-detection from --source-dir")
-    args = p.parse_args()
-
-    os.makedirs(args.out_dir, exist_ok=True)
-
-    source_repo, source_commit, firmware_blob_sha = detect_provenance(
-        args.source_dir, args.source_repo, args.source_commit, args.firmware_blob_sha)
-
-    times = edge_times(args.csv_path)
+def write_derived(out_dir, times, source_repo, source_commit, firmware_blob_sha):
+    """Run derive() over times and write the four derived/ files into
+    out_dir. Shared with verify_evidence.py, which re-derives a package
+    into a scratch dir through this same code and compares the bytes.
+    Returns (paths, report)."""
+    os.makedirs(out_dir, exist_ok=True)
     all_intervals, accepted_intervals, comparison_bits, counts = derive(times)
-    print(f"{args.csv_path}: {len(times)} edge(s) -> {len(all_intervals)} raw "
-          f"interval(s), {len(accepted_intervals)} accepted, "
-          f"{len(comparison_bits)} comparison bit(s)")
 
-    all_path = os.path.join(args.out_dir, "all_intervals_us.csv")
+    all_path = os.path.join(out_dir, "all_intervals_us.csv")
     with open(all_path, "w", newline="") as f:
         w = csv.writer(f)
         w.writerow(["interval_us"])
         w.writerows([v] for v in all_intervals)
 
-    accepted_path = os.path.join(args.out_dir, "firmware_accepted_intervals_us.csv")
+    accepted_path = os.path.join(out_dir, "firmware_accepted_intervals_us.csv")
     with open(accepted_path, "w", newline="") as f:
         w = csv.writer(f)
         w.writerow(["interval_us"])
         w.writerows([v] for v in accepted_intervals)
 
-    bits_path = os.path.join(args.out_dir, "comparison_bits.bin")
+    bits_path = os.path.join(out_dir, "comparison_bits.bin")
     with open(bits_path, "wb") as f:
         f.write(bytes(comparison_bits))
 
@@ -207,10 +187,42 @@ def main():
         "comparison_bits": len(comparison_bits),
         "dangling_unpaired_intervals": counts["dangling_unpaired"],
     }
-    report_path = os.path.join(args.out_dir, "derivation_report.json")
-    with open(report_path, "w") as f:
+    report_path = os.path.join(out_dir, "derivation_report.json")
+    # LF on every platform, like package_evidence.py's own files.
+    with open(report_path, "w", newline="\n") as f:
         json.dump(report, f, indent=2)
         f.write("\n")
+
+    return (all_path, accepted_path, bits_path, report_path), report
+
+
+def main():
+    p = argparse.ArgumentParser()
+    p.add_argument("csv_path", help="raw_edges.csv from capture_serial_to_csv.py")
+    p.add_argument("--out-dir", default="derived",
+                    help="directory for the derived/ package (default: ./derived)")
+    p.add_argument("--source-dir",
+                    help="path to a local checkout of the firmware this run's "
+                         "200us-filter/pairing/bit-rule constants are claimed "
+                         "to match (e.g. entropy32_plus/) — used to auto-fill "
+                         "--source-repo/--source-commit/--firmware-blob-sha "
+                         "from git and the checked-out .ino, for anything not "
+                         "given explicitly")
+    p.add_argument("--source-repo", help="overrides auto-detection from --source-dir")
+    p.add_argument("--source-commit", help="overrides auto-detection from --source-dir")
+    p.add_argument("--firmware-blob-sha", help="overrides auto-detection from --source-dir")
+    args = p.parse_args()
+
+    source_repo, source_commit, firmware_blob_sha = detect_provenance(
+        args.source_dir, args.source_repo, args.source_commit, args.firmware_blob_sha)
+
+    times = edge_times(args.csv_path)
+    (all_path, accepted_path, bits_path, report_path), report = write_derived(
+        args.out_dir, times, source_repo, source_commit, firmware_blob_sha)
+    print(f"{args.csv_path}: {report['raw_edges']} edge(s) -> "
+          f"{report['unfiltered_intervals']} raw interval(s), "
+          f"{report['accepted_intervals']} accepted, "
+          f"{report['comparison_bits']} comparison bit(s)")
 
     print(f"\nWrote {all_path}, {accepted_path}, {bits_path}, {report_path}")
     print(json.dumps(report, indent=2))
