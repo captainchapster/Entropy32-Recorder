@@ -22,6 +22,14 @@ source's rate that's essentially free, and each edge is an
 irreplaceable physical event, so there's nothing to configure and
 nothing to report: a row on screen is already durable.
 
+By default the capture runs until the protocol's stop gate (Section 3)
+is met: at least 1,000,000 comparison bits (which implies the gate's
+1,000,000 unfiltered intervals too - each bit consumes two), counted live with derive_evidence.py's own Section 5
+reconstruction (200us filter, non-overlapping pairs, ties discarded) -
+so it can't stop short the way a fixed edge count can (2,000,000 edges
+gives only 999,999 bits). --target-bits changes the bit target;
+--count N instead stops after exactly N edges, for smoke tests.
+
 This script intentionally refuses to run at all if --out already has
 data — one capture is one continuous, uninterrupted run from edge 0, per
 the evidence protocol; there is no --resume. If the capture stops for
@@ -48,8 +56,8 @@ protocol does not interpolate.
 Requires: pip install pyserial
 
 Usage:
-    python capture_serial_to_csv.py --port /dev/ttyUSB0 --count 2000
-    python capture_serial_to_csv.py --port COM5 --count 2000
+    python capture_serial_to_csv.py --port COM5               # full campaign
+    python capture_serial_to_csv.py --port /dev/ttyUSB0 --count 2000  # smoke test
 """
 import argparse
 import csv
@@ -61,7 +69,12 @@ from datetime import datetime, timedelta, timezone
 
 import serial
 
+from derive_evidence import Reconstructor
 from edge_timing import WRAP_WARN_MARGIN_US, wrap_delta, near_wrap
+
+# Section 3's stop gate. Each comparison bit consumes two accepted
+# intervals, so reaching it in bits also meets the interval half.
+STOP_GATE = 1_000_000
 
 
 def format_duration(seconds):
@@ -129,8 +142,14 @@ def main():
     p.add_argument("--port", required=True, help="e.g. /dev/ttyUSB0 or COM5")
     p.add_argument("--baud", type=int, default=115200)
     p.add_argument("--out", default="raw_edges.csv")
-    p.add_argument("--count", type=int, default=2000,
-                    help="stop after this many edges (~2000 is ~1hr at 20 CPM)")
+    target = p.add_mutually_exclusive_group()
+    target.add_argument("--target-bits", type=int,
+                        help=f"stop once this many comparison bits exist "
+                             f"(default {STOP_GATE:,}, the protocol's stop gate)")
+    target.add_argument("--count", type=int,
+                        help="instead stop after exactly this many edges - for "
+                             "smoke tests (~2000 is ~1hr at 20 CPM); below the "
+                             "stop gate this is a pilot, not evidence")
     p.add_argument("--stats-every", type=int, default=100,
                     help="recompute CPM/Poisson/ETA every N edges (0 to "
                          "disable them); the edge counter itself still "
@@ -142,6 +161,8 @@ def main():
                     help="if --out already exists, overwrite and start a "
                          "fresh capture without asking for confirmation")
     args = p.parse_args()
+    if args.count is None and args.target_bits is None:
+        args.target_bits = STOP_GATE
 
     # --- output plumbing -------------------------------------------------
     # A single mutable flag tracks whether the in-place progress line is
@@ -171,7 +192,18 @@ def main():
         warn(msg)
         sys.exit(1)
 
-    count_width = len(str(args.count))
+    # Progress is measured in edges for --count, comparison bits otherwise.
+    unit = "edges" if args.count else "bits"
+    goal = args.count or args.target_bits
+    count_width = len(str(goal))
+
+    def done_amount():
+        return n if args.count else rec.comparison_bits_count
+
+    def finished():
+        if args.count:
+            return n >= args.count
+        return rec.comparison_bits_count >= args.target_bits
 
     def show(content):
         # Overwrites the current line in place. content's length varies
@@ -201,11 +233,14 @@ def main():
         mean_us = elapsed_us / diff_count
         cpm = 60e6 * diff_count / elapsed_us if elapsed_us > 0 else float("nan")
         verdict = poisson_status(mean_us, diff_count, bounce_counts)
-        remaining = args.count - n_done
+        remaining = goal - n_done
+        # Units of progress per minute: edges for --count, otherwise the
+        # observed bit rate (~half the edge rate, less rejections/ties).
+        rate = cpm if args.count else 60e6 * n_done / elapsed_us if elapsed_us > 0 else 0
         if remaining <= 0:
             eta_str = "done"
-        elif cpm and cpm > 0 and not math.isnan(cpm):
-            eta_seconds = remaining / cpm * 60
+        elif rate and rate > 0 and not math.isnan(rate):
+            eta_seconds = remaining / rate * 60
             finish_time = datetime.now() + timedelta(seconds=eta_seconds)
             eta_str = (f"{format_duration(eta_seconds)} remaining, "
                        f"ETA {finish_time.strftime('%Y-%m-%d %H:%M')}")
@@ -214,9 +249,10 @@ def main():
         return f" — {cpm:.2f} CPM, poisson check: {verdict}, {eta_str}"
 
     def progress_line(n_done):
-        pct = 100.0 * n_done / args.count
-        return (f"  {n_done:>{count_width}}/{args.count} edges "
-                f"({pct:5.1f}%){stats_suffix}")
+        pct = min(100.0, 100.0 * n_done / goal)
+        edges = "" if args.count else f", {n} edges"
+        return (f"  {n_done:>{count_width}}/{goal} {unit} "
+                f"({pct:5.1f}%{edges}){stats_suffix}")
 
     # --- pre-flight --------------------------------------------------------
     if os.path.exists(args.out):
@@ -239,7 +275,11 @@ def main():
     log("Entropy32 Recorder capture")
     log(f"  port     {args.port} @ {args.baud} baud")
     log(f"  output   {args.out}")
-    log(f"  target   {args.count} edges")
+    if args.count:
+        log(f"  target   {args.count} edges (smoke test - fixed edge count)")
+    else:
+        gate = " (Section 3 stop gate)" if args.target_bits >= STOP_GATE else " (pilot)"
+        log(f"  target   {args.target_bits:,} comparison bits{gate}")
     log()
     log(f"Waiting for device on {args.port}...")
 
@@ -250,6 +290,7 @@ def main():
     monotonic_start = None
     diff_count = 0
     bounce_counts = {t_ms: 0 for t_ms in POISSON_CHECK_THRESHOLDS_MS}
+    rec = Reconstructor(keep=False)
     connected = False
     consecutive_timeouts = 0
     interrupted = False
@@ -259,7 +300,7 @@ def main():
         writer = csv.writer(f)
         writer.writerow(["edge_index", "raw_timer_ticks", "monotonic_timestamp_us"])
         try:
-            while n < args.count:
+            while not finished():
                 raw = ser.readline()
                 if not raw:
                     consecutive_timeouts += 1
@@ -321,6 +362,7 @@ def main():
                         if delta < t_ms * 1000:
                             bounce_counts[t_ms] += 1
                 prev_raw = ts
+                rec.add(monotonic)
                 capture_end_utc = datetime.now(timezone.utc)
 
                 writer.writerow([n, ts, monotonic])
@@ -329,15 +371,15 @@ def main():
                 n += 1
 
                 if args.stats_every and diff_count > 0 and n % args.stats_every == 0:
-                    stats_suffix = compute_stats(n)
+                    stats_suffix = compute_stats(done_amount())
                     # On a live terminal the line below already carries this
                     # and refreshes every edge; without one (output piped
                     # to a file), that update is invisible, so log this
                     # snapshot as a permanent line instead.
                     if not show_progress:
-                        log(progress_line(n))
+                        log(progress_line(done_amount()))
 
-                show(progress_line(n))
+                show(progress_line(done_amount()))
         except KeyboardInterrupt:
             interrupted = True
 
@@ -351,11 +393,14 @@ def main():
              "is not valid evidence (not a complete, uninterrupted run). "
              "Start a fresh run under a new --out to try again.")
     else:
-        log(f"Capture complete: {n} edges written to {args.out}")
+        log(f"Capture complete: {n} edges written to {args.out} "
+            f"({rec.comparison_bits_count:,} comparison bits)")
         status = {
             "raw_edge_count": n,
             "capture_start_utc": capture_start_utc.isoformat() if capture_start_utc else None,
             "capture_end_utc": capture_end_utc.isoformat() if capture_end_utc else None,
+            "stop_rule": (f"edge_count={args.count}" if args.count else
+                          f"comparison_bits>={args.target_bits}"),
             "port": args.port,
             "baud": args.baud,
             # Always 0 here by construction, not by counting: the board's
@@ -369,7 +414,7 @@ def main():
             "capture_status": "COMPLETE",
         }
         sp = status_path(args.out)
-        with open(sp, "w") as sf:
+        with open(sp, "w", newline="\n") as sf:
             json.dump(status, sf, indent=2)
             sf.write("\n")
         log(f"Wrote {sp}")

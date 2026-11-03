@@ -100,12 +100,18 @@ filename that only exists one level down.
 
    ```
    pip install pyserial
-   python tools/capture_serial_to_csv.py --port COM5 --count 2000 --out tools/raw_edges.csv
+   python tools/capture_serial_to_csv.py --port COM5 --out tools/raw_edges.csv
    ```
 
    (`--port` is a COM port like `COM5` on Windows, or a device path like
    `/dev/ttyUSB0` on Linux.) This writes `tools/raw_edges.csv` and, once
    the run completes fully, a `tools/raw_edges.status.json` sibling.
+
+   By default it runs until the protocol's stop gate is met — 1,000,000
+   comparison bits, counted live using the same reconstruction as step 5
+   — so it can't stop one bit short the way a fixed edge count can
+   (2,000,000 edges yields only 999,999 bits). For a quick pipeline smoke
+   test, stop after a fixed number of edges instead with `--count 2000`.
 3. If the board reports `OVERRUN_DETECTED`, or the capture stops for any
    other reason (crash, USB drop, closing the terminal), that run is
    invalid per the evidence protocol — one capture is one continuous,

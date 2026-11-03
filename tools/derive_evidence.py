@@ -95,53 +95,78 @@ def detect_provenance(source_dir, source_repo, source_commit, firmware_blob_sha)
             firmware_blob_sha or "unknown")
 
 
+class Reconstructor:
+    """Section 5's reconstruction, one edge timestamp (already monotonic —
+    see capture_serial_to_csv.py) at a time. derive() runs it over a whole
+    capture; capture_serial_to_csv.py runs it live, so it can stop on the
+    protocol's comparison-bit gate (Section 3) using exactly these rules.
+    keep=False tracks only the counts, not the interval/bit lists."""
+
+    def __init__(self, keep=True):
+        self.keep = keep
+        self.all_intervals = []
+        self.accepted_intervals = []
+        self.comparison_bits = []
+        self.counts = dict(unfiltered_intervals=0, accepted_intervals=0,
+                           short_interval_rejections=0, complete_pairs=0,
+                           ties=0, comparison_zeroes=0, comparison_ones=0)
+        self.prev = None
+        self.last_accepted = None
+        self.have_first = False
+        self.first_interval = None
+
+    @property
+    def comparison_bits_count(self):
+        return self.counts["comparison_zeroes"] + self.counts["comparison_ones"]
+
+    def add(self, t):
+        c = self.counts
+        if self.prev is None:
+            self.prev = self.last_accepted = t
+            return
+        c["unfiltered_intervals"] += 1
+        if self.keep:
+            self.all_intervals.append(t - self.prev)
+        self.prev = t
+
+        interval = t - self.last_accepted
+        if interval < MIN_INTERVAL_US:
+            c["short_interval_rejections"] += 1
+            return  # do NOT update last_accepted
+        c["accepted_intervals"] += 1
+        if self.keep:
+            self.accepted_intervals.append(interval)
+        self.last_accepted = t
+
+        if not self.have_first:
+            self.first_interval = interval
+            self.have_first = True
+            return
+        second_interval = interval
+        c["complete_pairs"] += 1
+        if second_interval > self.first_interval:
+            bit = 1
+            c["comparison_ones"] += 1
+        elif second_interval < self.first_interval:
+            bit = 0
+            c["comparison_zeroes"] += 1
+        else:
+            bit = None
+            c["ties"] += 1
+        if self.keep and bit is not None:
+            self.comparison_bits.append(bit)
+        self.have_first = False
+
+
 def derive(times):
     """One pass of Section 5's reconstruction over the capture's edge
-    timestamps (already monotonic — see capture_serial_to_csv.py).
-    Returns (all_intervals, accepted_intervals, comparison_bits, counts)."""
-    all_intervals = []
-    accepted_intervals = []
-    comparison_bits = []
-    counts = dict(short_interval_rejections=0, complete_pairs=0, ties=0,
-                  comparison_zeroes=0, comparison_ones=0, dangling_unpaired=0)
-
-    last_accepted = None
-    have_first = False
-    first_interval = None
-
-    for i, t in enumerate(times):
-        if i == 0:
-            last_accepted = t
-            continue
-        all_intervals.append(t - times[i - 1])
-
-        interval = t - last_accepted
-        if interval < MIN_INTERVAL_US:
-            counts["short_interval_rejections"] += 1
-            continue  # do NOT update last_accepted
-        accepted_intervals.append(interval)
-        last_accepted = t
-
-        if not have_first:
-            first_interval = interval
-            have_first = True
-        else:
-            second_interval = interval
-            counts["complete_pairs"] += 1
-            if second_interval > first_interval:
-                comparison_bits.append(1)
-                counts["comparison_ones"] += 1
-            elif second_interval < first_interval:
-                comparison_bits.append(0)
-                counts["comparison_zeroes"] += 1
-            else:
-                counts["ties"] += 1
-            have_first = False
-
-    if have_first:
-        counts["dangling_unpaired"] = 1
-
-    return all_intervals, accepted_intervals, comparison_bits, counts
+    timestamps. Returns (all_intervals, accepted_intervals,
+    comparison_bits, counts)."""
+    rec = Reconstructor()
+    for t in times:
+        rec.add(t)
+    counts = dict(rec.counts, dangling_unpaired=int(rec.have_first))
+    return rec.all_intervals, rec.accepted_intervals, rec.comparison_bits, counts
 
 
 def write_derived(out_dir, times, source_repo, source_commit, firmware_blob_sha):
